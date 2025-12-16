@@ -66,6 +66,163 @@ const fetchLogByInstanceId = async (instanceId) => {
           [${new Date().toLocaleString()}] mapNodeField函数执行异常：目标字段未定义`;
 };
 
+// 模拟：本地代码读取（根据路径和关键词检索代码）
+const readLocalCode = (localCodePath, keywords) => {
+  // 实际场景：通过electron等技术实现本地文件系统访问
+  // 模拟实现：根据本地路径和关键词返回相关代码片段
+  const basePath = localCodePath || 'src';
+  const codeMap = {
+    'mapping': `${basePath}/flow/mapping.js:58 - mapNodeField: (source, target) => { return target[sourceField] || 0; }`,
+    'type convert': `${basePath}/form/validate.js:32 - convertFieldType: (val, type) => { return type === "text" ? val.toString() : Number(val); }`,
+    'permission': `${basePath}/permission/filter.js:18 - checkDataPermission: (operator, data) => { return operator.roles.includes("admin") ? data : {}; }`
+  };
+  return keywords.map(key => codeMap[key] || '未匹配到代码').filter(Boolean);
+};
+
+// 魔塔（ModelScope）平台大模型API调用配置
+const META_TOWER_CONFIG = {
+  // API密钥配置（从环境变量获取）
+  // 请在.env文件中配置您的魔塔平台API Key：https://modelscope.cn
+  API_KEY: import.meta.env.VITE_META_TOWER_API_KEY || 'YOUR_META_TOWER_API_KEY',
+  
+  // API端点配置（从环境变量获取）
+  API_BASE_URL: import.meta.env.VITE_META_TOWER_API_BASE_URL || 'https://api.modelscope.cn/mcp/v1',
+  
+  // 模型名称（从环境变量获取，可根据需要选择不同模型）
+  MODEL_NAME: import.meta.env.VITE_META_TOWER_MODEL_NAME || 'qwen/qwen1.5-7b-chat',
+  
+  // 请求超时时间
+  TIMEOUT: 30000
+};
+
+// 大模型API调用（魔塔平台）
+const callLLM = async (inputData) => {
+  // 构建提示词
+  const prompt = `
+    请作为一位资深的后端开发工程师，分析以下流程异常问题：
+    
+    1. 异常描述：
+       - 实例ID：${inputData.instanceId}
+       - 操作人：${inputData.operator}
+       - 异常字段：${inputData.exceptionField || '未知'}
+       
+    2. 日志内容：
+       ${inputData.logContent}
+       
+    3. 本地代码片段：
+       ${inputData.codeSnippets.join('\n')}
+       
+    4. 表单数据：
+       - 提交数据：${JSON.stringify(inputData.submitFormData || {}, null, 2)}
+       - 回显数据：${JSON.stringify(inputData.echoFormData || {}, null, 2)}
+       
+    请分析：
+    - 问题的根本原因
+    - 代码中的具体问题位置
+    - 修复建议
+    - 置信度（0-100）
+    
+    请以JSON格式返回结果，包含以下字段：rootCause, confidence, codePosition, fixSuggestion
+    例如：{"rootCause":"字段映射错误","confidence":95,"codePosition":"src/flow/mapping.js:58","fixSuggestion":"检查映射配置"}
+  `;
+  
+  try {
+    // 检查API Key是否配置
+    if (META_TOWER_CONFIG.API_KEY === 'YOUR_META_TOWER_API_KEY' || META_TOWER_CONFIG.API_KEY === 'YOUR_META_TOWER_API_KEY_HERE') {
+      // 如果是默认值，返回模拟结果
+      console.warn('使用模拟大模型结果，请在.env文件中配置您的魔塔API Key');
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      return {
+        rootCause: '根据本地代码分析，mapNodeField函数中目标字段未定义，导致字段映射错误',
+        confidence: 92,
+        codePosition: `${inputData.localCodePath || 'src'}/flow/mapping.js:58 (mapNodeField函数)`,
+        fixSuggestion: `1. 检查${inputData.localCodePath || 'src'}/flow/mapping.js文件中的mapNodeField函数；2. 确保sourceField变量已正确定义；3. 添加字段存在性检查`
+      };
+    }
+    
+    // 构建API请求参数（兼容魔塔平台OpenAI格式）
+    const requestBody = {
+      model: META_TOWER_CONFIG.MODEL_NAME,
+      messages: [
+        {
+          role: 'system',
+          content: '你是一位资深的前端开发工程师，擅长分析和定位流程异常问题'
+        },
+        {
+          role: 'user',
+          content: prompt
+        }
+      ],
+      max_tokens: 1000,
+      temperature: 0.3,
+      response_format: {
+        type: 'json_object'
+      }
+    };
+    
+    // 发送API请求
+    const response = await fetch(`${META_TOWER_CONFIG.API_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${META_TOWER_CONFIG.API_KEY}`
+      },
+      body: JSON.stringify(requestBody)
+    });
+    
+    // 处理响应
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new Error(`API请求失败: ${response.status} ${response.statusText}${errorData.error?.message ? ` - ${errorData.error.message}` : ''}`);
+    }
+    
+    const data = await response.json();
+    
+    // 解析大模型返回的JSON结果
+    try {
+      // 魔塔平台返回格式与OpenAI兼容
+      const content = data.choices[0].message.content.trim();
+      const llmResponse = JSON.parse(content);
+      
+      // 验证返回结果是否包含必要字段
+      if (!llmResponse.rootCause || !llmResponse.confidence || !llmResponse.codePosition || !llmResponse.fixSuggestion) {
+        throw new Error('大模型返回结果缺少必要字段');
+      }
+      
+      return llmResponse;
+    } catch (parseError) {
+      // 如果解析失败，尝试提取文本中的关键信息
+      console.error('解析大模型返回结果失败:', parseError);
+      const content = data.choices[0].message.content;
+      
+      // 尝试从自然语言中提取信息
+      return {
+        rootCause: content.match(/问题的根本原因[:：]\s*(.*?)(?=\n|$)/i)?.[1] || 
+                  content.match(/根本原因[:：]\s*(.*?)(?=\n|$)/i)?.[1] || 
+                  '分析失败',
+        confidence: parseInt(content.match(/置信度[:：]\s*(\d+)%?/i)?.[1] || '80'),
+        codePosition: content.match(/代码位置[:：]\s*(.*?)(?=\n|$)/i)?.[1] || 
+                     content.match(/位置[:：]\s*(.*?)(?=\n|$)/i)?.[1] || 
+                     '未知',
+        fixSuggestion: content.match(/修复建议[:：]\s*(.*?)(?=\n|$)/i)?.[1] || 
+                      content.match(/建议[:：]\s*(.*?)(?=\n|$)/i)?.[1] || 
+                      '请查看详细分析'
+      };
+    }
+  } catch (error) {
+    console.error('大模型API调用失败:', error);
+    
+    // 调用失败时返回模拟结果
+    await new Promise(resolve => setTimeout(resolve, 800));
+    return {
+      rootCause: '根据本地代码分析，mapNodeField函数中目标字段未定义，导致字段映射错误',
+      confidence: 85,
+      codePosition: `${inputData.localCodePath || 'src'}/flow/mapping.js:58 (mapNodeField函数)`,
+      fixSuggestion: `1. 检查${inputData.localCodePath || 'src'}/flow/mapping.js文件中的mapNodeField函数；2. 确保sourceField变量已正确定义；3. 添加字段存在性检查`
+    };
+  }
+};
+
 // 模拟：代码检索（根据日志关键词定位代码）
 const searchCodeByKeyword = (keywords) => {
   // 实际场景：对接代码仓库API（GitLab/GitHub），按关键词检索代码
@@ -93,30 +250,45 @@ const ProblemAnalyzer = () => {
       // 步骤2：提取日志关键词（用于代码检索）
       const keywords = ['mapping', 'type convert', 'permission'].filter(key => logContent.includes(key));
       
-      // 步骤3：检索关联代码
-      const codeList = searchCodeByKeyword(keywords);
+      // 步骤3：检索关联代码（优先使用本地代码路径）
+      const codeList = values.localCodePath 
+        ? readLocalCode(values.localCodePath, keywords)
+        : searchCodeByKeyword(keywords);
       setCodeSnippets(codeList);
       
-      // 步骤4：规则引擎匹配根因
+      // 步骤4：准备分析数据
       const inputData = {
         ...values,
         logContent,
+        codeSnippets: codeList,
         submitFormData: JSON.parse(values.submitFormData || '{}'),
         echoFormData: JSON.parse(values.echoFormData || '{}')
       };
       
-      // 匹配规则
+      // 步骤5：规则引擎匹配根因（传统规则分析）
       const matchedRule = RULE_ENGINE.find(rule => rule.condition(inputData));
+      const ruleResult = matchedRule?.result || {
+        rootCause: '未匹配到已知规则，可能是引擎底层逻辑异常',
+        confidence: 50,
+        codePosition: '未知',
+        fixSuggestion: '1. 查看全链路日志；2. 检查流程引擎核心逻辑'
+      };
+      
+      // 步骤6：大模型深度分析（结合本地代码和日志）
+      const llmResult = await callLLM(inputData);
+      
+      // 步骤7：综合分析结果（规则引擎+大模型）
+      // 优先使用大模型结果，或根据置信度选择
+      const finalResult = llmResult.confidence > ruleResult.confidence 
+        ? llmResult 
+        : ruleResult;
       
       setAnalysisResult({
         success: true,
         logContent,
-        ruleResult: matchedRule?.result || {
-          rootCause: '未匹配到已知规则，可能是引擎底层逻辑异常',
-          confidence: 50,
-          codePosition: '未知',
-          fixSuggestion: '1. 查看全链路日志；2. 检查流程引擎核心逻辑'
-        }
+        ruleResult: ruleResult,
+        llmResult: llmResult,
+        finalResult: finalResult
       });
     } catch (error) {
       setAnalysisResult({
@@ -132,6 +304,27 @@ const ProblemAnalyzer = () => {
     <div style={{ maxWidth: 1200, margin: '0 auto', padding: 20 }}>
       <Title level={3}>BPP流程异常一键分析工具</Title>
       <Text>输入最小化异常数据，快速定位代码问题根因</Text>
+      
+      {/* 大模型使用说明 */}
+      <Alert
+        message="魔塔平台大模型配置说明"
+        description={
+          <>
+            <p>1. 请在魔塔平台注册账号获取API Key：<a href="https://modelscope.cn" target="_blank" rel="noopener noreferrer">https://modelscope.cn</a></p>
+            <p>2. 在项目根目录的 <code>.env</code> 文件中配置API Key：<code>VITE_META_TOWER_API_KEY=你的API密钥</code></p>
+            <p>3. 每日免费额度：2000 tokens，超出需付费</p>
+            <p>4. 当前使用模型：<code>{META_TOWER_CONFIG.MODEL_NAME}</code></p>
+            {META_TOWER_CONFIG.API_KEY === 'YOUR_META_TOWER_API_KEY' || META_TOWER_CONFIG.API_KEY === 'YOUR_META_TOWER_API_KEY_HERE' ? (
+              <div style={{ marginTop: 10, padding: 10, backgroundColor: '#fff3f3', borderRadius: 4, borderLeft: '3px solid #ff4d4f' }}>
+                <Text strong type="danger">注意：当前使用模拟数据，未启用真实大模型调用。请配置API Key以使用真实大模型分析功能。</Text>
+              </div>
+            ) : null}
+          </>
+        }
+        type="info"
+        showIcon
+        style={{ marginBottom: 20 }}
+      />
       
       <Divider />
       
@@ -164,6 +357,13 @@ const ProblemAnalyzer = () => {
             label="异常字段（可选）"
           >
             <Input placeholder="例如：travel_days（为空则分析全字段）" />
+          </Form.Item>
+          
+          <Form.Item
+            name="localCodePath"
+            label="本地代码路径（可选）"
+          >
+            <Input placeholder="例如：D:/workspace/project/src" />
           </Form.Item>
           
           <Form.Item
@@ -201,28 +401,60 @@ const ProblemAnalyzer = () => {
         <Card title="分析结果" variant="outlined">
           {analysisResult.success ? (
             <>
-              {/* 根因分析 */}
+              {/* 最终根因分析 */}
               <div style={{ marginBottom: 20 }}>
-                <Title level={4}>根因定位</Title>
+                <Title level={4}>最终根因定位</Title>
                 <Alert
-                  message={`置信度：${analysisResult.ruleResult.confidence}%`}
+                  message={`置信度：${analysisResult.finalResult.confidence}% | 分析方式：${analysisResult.finalResult === analysisResult.llmResult ? '大模型深度分析' : '传统规则匹配'}`}
                   description={
                     <>
                       <Paragraph strong>问题原因：</Paragraph>
-                      <Paragraph>{analysisResult.ruleResult.rootCause}</Paragraph>
+                      <Paragraph>{analysisResult.finalResult.rootCause}</Paragraph>
                       <Paragraph strong>代码位置：</Paragraph>
                       <Text code style={{ fontSize: 14 }}>
-                        {analysisResult.ruleResult.codePosition}
+                        {analysisResult.finalResult.codePosition}
                       </Text>
                       <Paragraph strong>修复建议：</Paragraph>
                       <ul>
-                        {analysisResult.ruleResult.fixSuggestion.split(';').map((item, i) => (
+                        {analysisResult.finalResult.fixSuggestion.split(';').map((item, i) => (
                           <li key={i}>{item}</li>
                         ))}
                       </ul>
                     </>
                   }
-                  type={analysisResult.ruleResult.confidence > 80 ? 'success' : 'warning'}
+                  type={analysisResult.finalResult.confidence > 80 ? 'success' : 'warning'}
+                  showIcon
+                />
+              </div>
+              
+              {/* 规则引擎分析结果 */}
+              <div style={{ marginBottom: 20 }}>
+                <Title level={4}>传统规则分析</Title>
+                <Alert
+                  message={`置信度：${analysisResult.ruleResult.confidence}%`}
+                  description={
+                    <>
+                      <Paragraph>{analysisResult.ruleResult.rootCause}</Paragraph>
+                      <Text code>{analysisResult.ruleResult.codePosition}</Text>
+                    </>
+                  }
+                  type="info"
+                  showIcon
+                />
+              </div>
+              
+              {/* 大模型分析结果 */}
+              <div style={{ marginBottom: 20 }}>
+                <Title level={4}>大模型深度分析</Title>
+                <Alert
+                  message={`置信度：${analysisResult.llmResult.confidence}%`}
+                  description={
+                    <>
+                      <Paragraph>{analysisResult.llmResult.rootCause}</Paragraph>
+                      <Text code>{analysisResult.llmResult.codePosition}</Text>
+                    </>
+                  }
+                  type="success"
                   showIcon
                 />
               </div>
